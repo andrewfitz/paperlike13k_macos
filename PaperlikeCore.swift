@@ -127,7 +127,6 @@ class NativeDaemonManager: ObservableObject {
     @Published var frontLight: Int = 0
     @Published var isConnected: Bool = false
     @Published var lastError: String = ""
-    @Published var activePort: String = "None"
     
     private var serialPort: SerialPort?
     private var timer: Timer?
@@ -147,7 +146,6 @@ class NativeDaemonManager: ObservableObject {
                 self.serialPort = port
                 DispatchQueue.main.async {
                     self.isConnected = true
-                    self.activePort = portPath
                     self.lastError = ""
                 }
                 
@@ -161,14 +159,12 @@ class NativeDaemonManager: ObservableObject {
                 let errString = String(cString: strerror(errno))
                 DispatchQueue.main.async {
                     self.isConnected = false
-                    self.activePort = portPath
                     self.lastError = "Failed to open port: \(errString)"
                 }
             }
         } else {
             DispatchQueue.main.async {
                 self.isConnected = false
-                self.activePort = "None"
                 self.lastError = "No CH340 / USB serial port found"
             }
         }
