@@ -1,41 +1,39 @@
-# Paperlike 13K 2025 Color — Linux Init Script
+# Paperlike 13K 2025 Color — macOS Init Script
 
-Open-source Linux init script for the DASUNG Paperlike 13K 2025 color e-ink display.
+Open-source macOS init script for the DASUNG Paperlike 13K 2025 color e-ink display.
 Replaces the proprietary PaperLikeClient app with a standalone Python script.
 
 ## Requirements
 
 - Python 3 + pyserial (`pip install pyserial`)
-- ch341 kernel module (usually loaded automatically)
+- CH34x VCP driver (often built-in on modern macOS, or from WCH website)
 
 ## Setup
 
 ```bash
 pip install pyserial
-sudo usermod -aG dialout $USER   # allow serial port access
-# Log out and back in for group change to take effect
 ```
 
 ## Usage
 
 ```bash
 # Init and keep display alive (recommended):
-python3 paperlike_init_linux.py --daemon
+./paperlike_init_macos.py --daemon
 
 # Single-shot init (display will deactivate without keepalive):
-python3 paperlike_init_linux.py
+./paperlike_init_macos.py
 
 # Adjust display settings (can combine multiple):
-python3 paperlike_init_linux.py --mode 3              # Display mode 1-6
-python3 paperlike_init_linux.py --brightness 32        # Brightness 0-64
-python3 paperlike_init_linux.py --speed 5              # Speed 1-8
-python3 paperlike_init_linux.py --temperature 3        # Color temperature 0-5
-python3 paperlike_init_linux.py --front-light 1        # Front light (0=off, 1=warm, 2=cold)
-python3 paperlike_init_linux.py --dither off            # MCU dithering (on/off)
-python3 paperlike_init_linux.py --refresh              # Force full refresh
-python3 paperlike_init_linux.py --query                # Query device info
-python3 paperlike_init_linux.py --mode 3 --brightness 32 --daemon  # Combine
-python3 paperlike_init_linux.py --send 0x02 0x03       # Send raw command
+./paperlike_init_macos.py --mode 3              # Display mode 1-6
+./paperlike_init_macos.py --brightness 32       # Brightness 0-64
+./paperlike_init_macos.py --speed 5             # Speed 1-8
+./paperlike_init_macos.py --temperature 3       # Color temperature 0-5
+./paperlike_init_macos.py --front-light 1       # Front light (0=off, 1=warm, 2=cold)
+./paperlike_init_macos.py --dither off          # MCU dithering (on/off)
+./paperlike_init_macos.py --refresh             # Force full refresh
+./paperlike_init_macos.py --query               # Query device info
+./paperlike_init_macos.py --mode 3 --brightness 32 --daemon  # Combine
+./paperlike_init_macos.py --send 0x02 0x03      # Send raw command
 ```
 
 ### Display modes
@@ -52,43 +50,21 @@ python3 paperlike_init_linux.py --send 0x02 0x03       # Send raw command
 ### Daemon control socket
 
 When the daemon is running, commands from other instances are automatically
-forwarded via a Unix socket (`$XDG_RUNTIME_DIR/paperlike.sock`). No need to
+forwarded via a Unix socket (e.g. `/var/folders/.../T/paperlike.sock`). No need to
 stop the daemon to change settings:
 
 ```bash
-python3 paperlike_init_linux.py --daemon &      # start daemon
-python3 paperlike_init_linux.py --brightness 50  # forwarded to daemon
-python3 paperlike_init_linux.py --mode 1         # forwarded to daemon
-python3 paperlike_init_linux.py --query           # forwarded to daemon
+./paperlike_init_macos.py --daemon &      # start daemon
+./paperlike_init_macos.py --brightness 50  # forwarded to daemon
+./paperlike_init_macos.py --mode 1         # forwarded to daemon
+./paperlike_init_macos.py --query          # forwarded to daemon
 ```
 
 ### Disconnect/reconnect
 
 In daemon mode, the script handles USB disconnect and reconnect automatically.
 When the display is unplugged, it waits for the device to reappear (the serial
-port path may change, e.g. `ttyUSB2` -> `ttyUSB3`) and re-runs the full init.
-
-### systemd service (auto-start on boot)
-
-```ini
-# /etc/systemd/system/paperlike.service
-[Unit]
-Description=Paperlike 13K Display Init
-After=multi-user.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /path/to/paperlike_init_linux.py --daemon
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl enable --now paperlike.service
-```
+port path may change, e.g. `cu.usbserial-1410` -> `cu.usbserial-1420`) and re-runs the full init.
 
 ## Hardware
 

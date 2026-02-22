@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Paperlike 13K 2025 Color Display - Linux Init Script
+Paperlike 13K 2025 Color Display - macOS Init Script
 
 Sends the serial initialization sequence over CH340 USB-serial to activate
 the e-ink display panel.
@@ -14,16 +14,16 @@ Protocol:
 
 Usage:
   pip install pyserial
-  python3 paperlike_init_linux.py --daemon              # Keep alive (recommended)
-  python3 paperlike_init_linux.py                       # Single-shot init
-  python3 paperlike_init_linux.py --mode 3              # Display mode 1-6
-  python3 paperlike_init_linux.py --brightness 32       # Brightness 0-64
-  python3 paperlike_init_linux.py --mode 3 --brightness 32 --daemon  # Combine
+  python3 paperlike_init_macos.py --daemon              # Keep alive (recommended)
+  python3 paperlike_init_macos.py                       # Single-shot init
+  python3 paperlike_init_macos.py --mode 3              # Display mode 1-6
+  python3 paperlike_init_macos.py --brightness 32       # Brightness 0-64
+  python3 paperlike_init_macos.py --mode 3 --brightness 32 --daemon  # Combine
 
   When a daemon is running, commands are forwarded to it automatically:
-  python3 paperlike_init_linux.py --brightness 50       # Sent via daemon
+  python3 paperlike_init_macos.py --brightness 50       # Sent via daemon
 
-Requires: ch341 kernel module (usually loaded automatically on Fedora)
+Requires: CH34x VCP driver (often built-in on modern macOS, or from WCH website)
 """
 
 import sys
@@ -31,8 +31,7 @@ import time
 import json
 import serial
 import serial.tools.list_ports
-import subprocess
-import glob
+import tempfile
 import os
 import signal
 import socket
@@ -41,8 +40,7 @@ import threading
 
 # ─── Socket path ──────────────────────────────────────────────────────────────
 
-SOCK_PATH = os.path.join(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'),
-                         'paperlike.sock')
+SOCK_PATH = os.path.join(tempfile.gettempdir(), 'paperlike.sock')
 
 
 # ─── Protocol ────────────────────────────────────────────────────────────────
@@ -156,44 +154,13 @@ def query_device_info(ser):
 
 # ─── Display detection / dithering ────────────────────────────────────────────
 
-def find_paperlike_connector():
-    """Find DRM connector for the Paperlike display."""
-    for edid_path in sorted(glob.glob('/sys/class/drm/card*-*/edid')):
-        try:
-            with open(edid_path, 'rb') as f:
-                edid = f.read()
-            if edid and (b'Paperlike' in edid or b'DASUNG' in edid):
-                dirname = os.path.basename(os.path.dirname(edid_path))
-                return dirname.split('-', 1)[1] if '-' in dirname else dirname
-        except (IOError, PermissionError):
-            continue
-    return None
-
-
 def try_disable_dithering(verbose=True):
-    """Attempt to disable GPU dithering."""
+    """Attempt to disable GPU dithering (macOS specific)."""
     if verbose:
-        print("\n--- Disable GPU dithering ---")
-    connector = find_paperlike_connector()
-    if connector and verbose:
-        print(f"  Paperlike on connector: {connector}")
-    if connector:
-        for prop in ['dithering', 'Dithering', 'dither']:
-            try:
-                r = subprocess.run(['xrandr', '--output', connector, '--set', prop, 'off'],
-                                   capture_output=True, text=True, timeout=5)
-                if r.returncode == 0 and verbose:
-                    print(f"  Disabled via xrandr --set {prop} off")
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
-    for p in glob.glob('/sys/kernel/debug/dri/*/amdgpu_dm_dither'):
-        try:
-            with open(p, 'w') as f:
-                f.write('0')
-            if verbose:
-                print(f"  Disabled AMD dithering via {p}")
-        except (PermissionError, IOError):
-            pass
+        print("\n--- GPU dithering ---")
+        print("  Note: Disabling GPU dithering automatically is not natively supported on macOS.")
+        print("  Recommendation: If you are on an Apple Silicon Mac, consider using the 'Stillcolor'")
+        print("  app to disable dithering for a better e-ink experience.")
 
 
 # ─── Control socket (daemon IPC) ─────────────────────────────────────────────
@@ -331,7 +298,7 @@ def activate_display(ser):
     try_disable_dithering()
 
     print("\n--- Activate display ---")
-    send_cmd(ser, 0x20, 0x01, "Dithering disable", wait=0.3)
+    send_cmd(ser, 0x20, 0x01, "Activate display", wait=0.3)
 
     print("\n--- Monitoring (5s) ---")
     start = time.time()
@@ -367,7 +334,7 @@ def wait_for_device(fixed_port=None):
 
 def init_display(port, daemon=False, interval=10):
     """Run the full Paperlike 13K init sequence."""
-    print(f"Paperlike 13K 2025 Color - Linux Init")
+    print(f"Paperlike 13K 2025 Color - macOS Init")
     print(f"Serial port: {port}")
     print("=" * 50)
 
@@ -462,6 +429,7 @@ def build_commands(args):
     if args.front_light is not None:
         commands.append((0x07, args.front_light, f"Set front light {args.front_light}"))
     if args.dither is not None:
+        # We still send the MCU dithering command although macOS dithering is separate
         val = 0 if args.dither == 'on' else 1
         commands.append((0x20, val, f"Dither {'on (enable)' if val == 0 else 'off (disable)'}"))
     if args.refresh:
@@ -509,9 +477,9 @@ def run_commands_direct(port, commands):
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description='Paperlike 13K 2025 Color - Linux Init',
+        description='Paperlike 13K 2025 Color - macOS Init',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""\
+        epilog='''\
 examples:
   %(prog)s --daemon                          # Init + keep alive (recommended)
   %(prog)s                                   # Single-shot init
@@ -525,7 +493,7 @@ examples:
   %(prog)s --front-light 1                   # Set front light mode
   %(prog)s --send 0x02 0x03                  # Send raw command
   %(prog)s --send 0x02 0x03 --send 0x09 0x20 # Multiple raw commands
-  %(prog)s /dev/ttyUSB0 --daemon             # Specify port manually
+  %(prog)s /dev/cu.usbserial-1410 --daemon   # Specify port manually
 
 display modes (--mode):
   1 = Fast     2 = Fast+     3 = Balance
@@ -540,7 +508,7 @@ daemon reconnect:
   In --daemon mode, the script automatically handles USB disconnect/reconnect.
   When the display is unplugged, it waits for it to reappear (port path may
   change) and re-runs the full init sequence.
-""")
+''')
     parser.add_argument('port', nargs='?', help='Serial port (default: auto-detect)')
     parser.add_argument('--daemon', action='store_true', help='Keep sending activation (recommended)')
     parser.add_argument('--interval', type=int, default=10, help='Daemon interval seconds (default: 10)')
@@ -614,8 +582,7 @@ daemon reconnect:
         port = find_serial_port()
         if not port:
             print("ERROR: No CH340/CH341 serial port found.")
-            print("  sudo modprobe ch341")
-            print("  sudo usermod -aG dialout $USER")
+            print("  Please ensure the device is connected and drivers are installed.")
             sys.exit(1)
         print(f"Auto-detected: {port}")
 
