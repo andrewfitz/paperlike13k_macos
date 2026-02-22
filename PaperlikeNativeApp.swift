@@ -275,8 +275,8 @@ struct ContentView: View {
                     set: { manager.updateFrontLight($0) }
                 )) {
                     Text("Off").tag(0)
-                    Text("Warm").tag(1)
-                    Text("Cold").tag(2)
+                    Text("Cold").tag(1)
+                    Text("Warm").tag(2)
                 }
                 .pickerStyle(SegmentedPickerStyle())
             }
