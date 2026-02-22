@@ -496,8 +496,8 @@ examples:
   %(prog)s /dev/cu.usbserial-1410 --daemon   # Specify port manually
 
 display modes (--mode):
-  1 = Fast     2 = Fast+     3 = Balance
-  4 = Text     5 = Text+     6 = Read
+  1 = Web      2 = Text      3 = Image
+  4 = Active   5 = Heavy
 
 daemon control:
   When a daemon is running, setting commands (--mode, --brightness, etc.)
@@ -513,7 +513,7 @@ daemon reconnect:
     parser.add_argument('--daemon', action='store_true', help='Keep sending activation (recommended)')
     parser.add_argument('--interval', type=int, default=10, help='Daemon interval seconds (default: 10)')
     parser.add_argument('--mode', type=int, choices=range(1, 7), metavar='1-6',
-                        help='Set display mode (1=Fast 2=Fast+ 3=Balance 4=Text 5=Text+ 6=Read)')
+                        help='Set display mode (1=Web 2=Text 3=Image 4=Active 5=Heavy)')
     parser.add_argument('--speed', type=int, choices=range(1, 9), metavar='1-8',
                         help='Set speed/threshold (1-8)')
     parser.add_argument('--brightness', type=int, choices=range(0, 65), metavar='0-64',

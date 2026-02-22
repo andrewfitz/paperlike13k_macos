@@ -117,6 +117,37 @@ struct PaperlikeProtocol {
     static var activateDisplayCommand: String {
         return makePacket(cmd: 0x20, opt: 0x01)
     }
+    
+    static func parsePackets(_ data: String) -> [(cmd: UInt8, opt: UInt8, payload: String)] {
+        var results: [(cmd: UInt8, opt: UInt8, payload: String)] = []
+        let text = data.uppercased()
+        var searchPos = text.startIndex
+        
+        while let range = text.range(of: "5FF5", options: [], range: searchPos..<text.endIndex) {
+            let start = range.lowerBound
+            if let end = text.index(start, offsetBy: 24, limitedBy: text.endIndex) {
+                let pkt = String(text[start..<end])
+                if pkt.hasSuffix("A0FA") {
+                    let cmdStart = pkt.index(pkt.startIndex, offsetBy: 4)
+                    let cmdEnd = pkt.index(pkt.startIndex, offsetBy: 6)
+                    let optStart = pkt.index(pkt.startIndex, offsetBy: 6)
+                    let optEnd = pkt.index(pkt.startIndex, offsetBy: 8)
+                    let payloadStart = pkt.index(pkt.startIndex, offsetBy: 8)
+                    let payloadEnd = pkt.index(pkt.startIndex, offsetBy: 20)
+                    
+                    if let cmd = UInt8(pkt[cmdStart..<cmdEnd], radix: 16),
+                       let opt = UInt8(pkt[optStart..<optEnd], radix: 16) {
+                        let payload = String(pkt[payloadStart..<payloadEnd])
+                        results.append((cmd, opt, payload))
+                        searchPos = end
+                        continue
+                    }
+                }
+            }
+            searchPos = text.index(after: range.lowerBound)
+        }
+        return results
+    }
 }
 
 // MARK: - Daemon Manager
@@ -130,6 +161,7 @@ class NativeDaemonManager: ObservableObject {
     
     private var serialPort: SerialPort?
     private var timer: Timer?
+    private var readBuffer: String = ""
     private let queue = DispatchQueue(label: "com.paperlike.serialQueue")
     
     init() {
@@ -154,6 +186,12 @@ class NativeDaemonManager: ObservableObject {
                 
                 print("Activating display...")
                 sendCommand(cmd: 0x20, opt: 0x01)
+                
+                // Give it some time to wake up after activation
+                usleep(300_000)
+                
+                // Query current settings
+                queryExistingSettings()
                 return
             } else {
                 let errString = String(cString: strerror(errno))
@@ -216,6 +254,77 @@ class NativeDaemonManager: ObservableObject {
         port.writeString(packet)
         // give it time to flush on native IO
         usleep(100_000)
+    }
+    
+    private func queryExistingSettings() {
+        print("Querying device configuration...")
+        
+        // Python script queries 0x10 and 0x13 first
+        _ = sendQuerySync(opt: 0x10) // MCU version
+        _ = sendQuerySync(opt: 0x13) // Display version
+        
+        // Mode
+        if let val = sendQuerySync(opt: 0x02) {
+            print("  - Mode: \(val)")
+            DispatchQueue.main.async { self.mode = Int(val) }
+        }
+        // Speed
+        if let val = sendQuerySync(opt: 0x01) {
+            print("  - Speed: \(val)")
+            DispatchQueue.main.async { self.speed = Int(val) }
+        }
+        // Brightness
+        if let val = sendQuerySync(opt: 0x09) {
+            print("  - Brightness: \(val)")
+            DispatchQueue.main.async { self.brightness = Int(val) }
+        }
+        // Front Light
+        if let val = sendQuerySync(opt: 0x07) {
+            print("  - Front Light: \(val)")
+            DispatchQueue.main.async { self.frontLight = Int(val) }
+        }
+    }
+    
+    private func sendQuerySync(opt: UInt8) -> UInt8? {
+        guard let port = serialPort, port.isOpen() else { return nil }
+        let packet = PaperlikeProtocol.makePacket(cmd: 0x0A, opt: opt)
+        print("  TX Query [\(String(format: "%02X", opt))]: \(packet)")
+        port.writeString(packet)
+        
+        // Clear local buffer for this sync query to avoid stale responses
+        self.readBuffer = ""
+        
+        // Wait up to 1.5s for response (30 * 50ms)
+        for i in 0..<30 {
+            usleep(50_000)
+            let incoming = port.readAvailable()
+            if !incoming.isEmpty {
+                self.readBuffer += incoming
+                print("  RX Raw [\(i)]: \(incoming)")
+                
+                let packets = PaperlikeProtocol.parsePackets(self.readBuffer)
+                for p in packets {
+                    print("  Parsed packet: cmd=\(String(format: "%02X", p.cmd)), opt=\(String(format: "%02X", p.opt)), payload=\(p.payload)")
+                    
+                    if p.cmd == 0xF0 {
+                        // Response for query 0x0A is cmd 0xF0.
+                        // The device might not echo the 'opt' byte, so we accept any 0xF0 here
+                        // as long as we just sent a query.
+                        if p.payload.count >= 4 {
+                            let start = p.payload.index(p.payload.startIndex, offsetBy: 2)
+                            let end = p.payload.index(p.payload.startIndex, offsetBy: 4)
+                            if let val = UInt8(p.payload[start..<end], radix: 16) {
+                                // Reset buffer after finding our target
+                                self.readBuffer = ""
+                                return val
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        print("  Query timeout for opt \(String(format: "%02X", opt))")
+        return nil
     }
     
     deinit {

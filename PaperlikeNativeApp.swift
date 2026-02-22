@@ -245,12 +245,11 @@ struct ContentView: View {
                     get: { manager.mode },
                     set: { manager.updateMode($0) }
                 )) {
-                    Text("Fast").tag(1)
-                    Text("Fast+").tag(2)
-                    Text("Balance").tag(3)
-                    Text("Text").tag(4)
-                    Text("Text+").tag(5)
-                    Text("Read").tag(6)
+                    Text("Web").tag(1)
+                    Text("Text").tag(2)
+                    Text("Image").tag(3)
+                    Text("Active").tag(4)
+                    Text("Heavy").tag(5)
                 }
                 .labelsHidden()
                 .frame(maxWidth: .infinity)
