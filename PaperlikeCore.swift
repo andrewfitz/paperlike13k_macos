@@ -163,8 +163,12 @@ class NativeDaemonManager: ObservableObject {
     private var timer: Timer?
     private var readBuffer: String = ""
     private let queue = DispatchQueue(label: "com.paperlike.serialQueue")
+    private let modeDefaultsKey = "paperlikeMode"
     
     init() {
+        if UserDefaults.standard.object(forKey: modeDefaultsKey) != nil {
+            mode = UserDefaults.standard.integer(forKey: modeDefaultsKey)
+        }
         queue.async {
             self.connectAndInit()
         }
@@ -226,6 +230,7 @@ class NativeDaemonManager: ObservableObject {
     
     func updateMode(_ newValue: Int) {
         mode = newValue
+        UserDefaults.standard.set(newValue, forKey: modeDefaultsKey)
         queue.async { self.sendCommand(cmd: 0x02, opt: UInt8(newValue)) }
     }
     
@@ -266,7 +271,10 @@ class NativeDaemonManager: ObservableObject {
         // Mode
         if let val = sendQuerySync(opt: 0x02) {
             print("  - Mode: \(val)")
-            DispatchQueue.main.async { self.mode = Int(val) }
+            DispatchQueue.main.async {
+                self.mode = Int(val)
+                UserDefaults.standard.set(Int(val), forKey: self.modeDefaultsKey)
+            }
         }
         // Speed
         if let val = sendQuerySync(opt: 0x01) {

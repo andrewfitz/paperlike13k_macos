@@ -220,6 +220,13 @@ class CustomKeyView: NSView {
 struct ContentView: View {
     @ObservedObject var manager: NativeDaemonManager
     @ObservedObject var shortcutManager: GlobalShortcutManager
+    private let modeOptions: [(value: Int, title: String)] = [
+        (1, "Web"),
+        (2, "Text"),
+        (3, "Image"),
+        (4, "Active"),
+        (5, "Heavy")
+    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -239,26 +246,23 @@ struct ContentView: View {
                 }
             }
 
-            HStack {
-                Text("Mode:")
-                    .frame(width: 80, alignment: .leading)
-                Picker("", selection: Binding(
-                    get: { manager.mode },
-                    set: { manager.updateMode($0) }
-                )) {
-                    Text("Web").tag(1)
-                    Text("Text").tag(2)
-                    Text("Image").tag(3)
-                    Text("Active").tag(4)
-                    Text("Heavy").tag(5)
+            HStack(spacing: 6) {
+                ForEach(modeOptions, id: \.value) { modeOption in
+                    Button(modeOption.title) {
+                        manager.updateMode(modeOption.value)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
+                    .background(manager.mode == modeOption.value ? Color.accentColor : Color.secondary.opacity(0.2))
+                    .foregroundColor(manager.mode == modeOption.value ? .white : .primary)
+                    .cornerRadius(6)
                 }
-                .labelsHidden()
-                .frame(maxWidth: .infinity)
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Level (Speed):")
+                    Text("Darkness:")
                         .frame(width: 100, alignment: .leading)
                     Text("\(manager.speed)").monospacedDigit()
                 }
