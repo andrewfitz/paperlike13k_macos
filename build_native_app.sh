@@ -39,6 +39,6 @@ cat <<EOF > "$CONTENTS_DIR/Info.plist"
 EOF
 
 echo "Compiling Swift UI App..."
-swiftc PaperlikeCore.swift PaperlikeNativeApp.swift -o "$MACOS_DIR/$APP_NAME"
+swiftc PaperlikeCore.swift PaperlikeNativeApp.swift CarbonHotkeyManager.swift -o "$MACOS_DIR/$APP_NAME"
 
 echo "Done! The app is located at $APP_DIR"

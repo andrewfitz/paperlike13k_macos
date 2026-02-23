@@ -1,14 +1,26 @@
 import SwiftUI
 import AppKit
 
+class AppDelegate: NSObject, NSApplicationDelegate {
+    var daemonManager = NativeDaemonManager()
+    var shortcutManager = GlobalShortcutManager()
+    
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        shortcutManager.onTriggerForceRefresh = { [weak self] in
+            self?.daemonManager.forceRefresh()
+        }
+        // This is called once the app and its event loop are ready
+        print("App finished launching, managers initialized.")
+    }
+}
+
 @main
 struct PaperlikeNativeApp: App {
-    @StateObject private var daemonManager = NativeDaemonManager()
-    @StateObject private var shortcutManager = GlobalShortcutManager()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
         MenuBarExtra("Paperlike", systemImage: "display") {
-            ContentView(manager: daemonManager, shortcutManager: shortcutManager)
+            ContentView(manager: appDelegate.daemonManager, shortcutManager: appDelegate.shortcutManager)
         }
         .menuBarExtraStyle(.window)
     }
@@ -41,18 +53,19 @@ class SettingsWindowManager {
 class GlobalShortcutManager: ObservableObject {
     @Published var refreshKeyCode: UInt16?
     @Published var refreshModifiers: NSEvent.ModifierFlags?
+    var onTriggerForceRefresh: (() -> Void)?
     
-    private var globalMonitor: Any?
+    // Carbon doesn't need a global monitor reference like NSEvent does
+    // but we can wrap it in our manager.
+
     
     init() {
         loadShortcut()
-        setupGlobalMonitor()
+        setupCarbonHotkey()
     }
     
     deinit {
-        if let monitor = globalMonitor {
-            NSEvent.removeMonitor(monitor)
-        }
+        CarbonHotkeyManager.shared.unregister()
     }
     
     func saveShortcut(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
@@ -60,7 +73,7 @@ class GlobalShortcutManager: ObservableObject {
         self.refreshModifiers = modifiers
         UserDefaults.standard.set(Int(keyCode), forKey: "refreshKeyCode")
         UserDefaults.standard.set(modifiers.rawValue, forKey: "refreshModifiers")
-        setupGlobalMonitor()
+        setupCarbonHotkey()
     }
     
     func clearShortcut() {
@@ -68,39 +81,27 @@ class GlobalShortcutManager: ObservableObject {
         self.refreshModifiers = nil
         UserDefaults.standard.removeObject(forKey: "refreshKeyCode")
         UserDefaults.standard.removeObject(forKey: "refreshModifiers")
-        if let monitor = globalMonitor {
-            NSEvent.removeMonitor(monitor)
-            globalMonitor = nil
-        }
+        CarbonHotkeyManager.shared.unregister()
     }
     
     private func loadShortcut() {
         if UserDefaults.standard.object(forKey: "refreshKeyCode") != nil {
             self.refreshKeyCode = UInt16(UserDefaults.standard.integer(forKey: "refreshKeyCode"))
             self.refreshModifiers = NSEvent.ModifierFlags(rawValue: UInt(UserDefaults.standard.integer(forKey: "refreshModifiers")))
+            setupCarbonHotkey()
         }
     }
     
-    private func setupGlobalMonitor() {
-        if let monitor = globalMonitor {
-            NSEvent.removeMonitor(monitor)
-            globalMonitor = nil
-        }
+    private func setupCarbonHotkey() {
+        guard let code = refreshKeyCode, let mods = refreshModifiers else { return }
         
-        // Request Accessibility access if needed for global shortcuts
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        AXIsProcessTrustedWithOptions(options as CFDictionary)
-        
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self, let code = self.refreshKeyCode, let mods = self.refreshModifiers else { return }
-            
-            // Match keycode and essential modifiers (Command, Shift, Control, Option)
-            let eventMods = event.modifierFlags.intersection([.command, .shift, .control, .option])
-            let targetMods = mods.intersection([.command, .shift, .control, .option])
-            
-            if event.keyCode == code && eventMods == targetMods {
-                // Post notification mapped to Force Refresh
-                NotificationCenter.default.post(name: NSNotification.Name("TriggerForceRefresh"), object: nil)
+        CarbonHotkeyManager.shared.register(keyCode: code, modifiers: mods) {
+            if let onTriggerForceRefresh = self.onTriggerForceRefresh {
+                onTriggerForceRefresh()
+            } else {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: NSNotification.Name("TriggerForceRefresh"), object: nil)
+                }
             }
         }
     }
@@ -142,7 +143,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            Text("Note: Global shortcuts require Accessibility permissions in System Settings > Privacy & Security.")
+            Text("Note: Global shortcuts NO LONGER require Accessibility permissions.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
