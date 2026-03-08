@@ -6,6 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var shortcutManager = GlobalShortcutManager()
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DisplayDriverInitializer.applyInitOverrides()
         shortcutManager.onTriggerForceRefresh = { [weak self] in
             self?.daemonManager.forceRefresh()
         }

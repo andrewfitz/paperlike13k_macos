@@ -105,6 +105,43 @@ class SerialPort {
     }
 }
 
+private enum DisplayLocation {
+    case all
+    case embedded
+    case external
+}
+
+enum DisplayDriverInitializer {
+    static func applyInitOverrides() {
+        setProperties(["enableDither": kCFBooleanFalse], target: .all)
+        setProperties(["uniformity2D": kCFBooleanFalse], target: .embedded)
+    }
+
+    private static func setProperties(_ props: [String: CFTypeRef], target: DisplayLocation) {
+        var iterator = io_iterator_t()
+        defer { IOObjectRelease(iterator) }
+
+        let ret = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOMobileFramebufferAP"), &iterator)
+        guard ret == KERN_SUCCESS, iterator != IO_OBJECT_NULL else { return }
+
+        while true {
+            let service = IOIteratorNext(iterator)
+            if service == IO_OBJECT_NULL { break }
+            defer { IOObjectRelease(service) }
+
+            let externalValue = IORegistryEntryCreateCFProperty(service, "external" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+            let isExternal = (externalValue as? Bool) ?? false
+
+            if isExternal && target == .embedded { continue }
+            if !isExternal && target == .external { continue }
+
+            for (key, value) in props {
+                _ = IORegistryEntrySetCFProperty(service, key as CFString, value)
+            }
+        }
+    }
+}
+
 // MARK: - Protocol Logic
 struct PaperlikeProtocol {
     static func makePacket(cmd: UInt8, opt: UInt8) -> String {
