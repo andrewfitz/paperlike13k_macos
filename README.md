@@ -1,70 +1,72 @@
-# Paperlike 13K 2025 Color — macOS Init Script
+# Paperlike 13K 2025 Color — macOS
 
-Open-source macOS init script for the DASUNG Paperlike 13K 2025 color e-ink display.
-Replaces the proprietary PaperLikeClient app with a standalone Python script.
+Open-source native macOS controller for the DASUNG Paperlike 13K 2025 color e-ink display.
+Replaces the proprietary PaperLikeClient app with a Swift menu bar app and CLI tool.
 
 ## Requirements
 
-- Python 3 + pyserial (`pip install pyserial`)
+- macOS 15+ (Apple Silicon)
+- Xcode Command Line Tools (`xcode-select --install`)
 - CH34x VCP driver (often built-in on modern macOS, or from WCH website)
 
-## Setup
+## Build
 
 ```bash
-pip install pyserial
+bash build_native_app.sh
 ```
 
-## Usage
+This produces two binaries:
+- `PaperlikeNative.app` — menu bar GUI app
+- `paperlike` — CLI tool
+
+## GUI App
+
+```bash
+open PaperlikeNative.app
+```
+
+The menu bar app provides:
+- Display mode selection (Web, Text, Image, Active, Heavy)
+- Darkness/speed slider (1–8)
+- Brightness slider (0–64)
+- Front light control (Off, Cold, Warm, Both)
+- Auto-refresh on a configurable interval
+- Global keyboard shortcut for force refresh
+- Automatic device detection, keepalive, and reconnect
+
+Settings are persisted across launches.
+
+## CLI Tool
 
 ```bash
 # Init and keep display alive (recommended):
-./paperlike_init_macos.py --daemon
-
-# Single-shot init (display will deactivate without keepalive):
-./paperlike_init_macos.py
+./paperlike --daemon
 
 # Adjust display settings (can combine multiple):
-./paperlike_init_macos.py --mode 3              # Display mode 1-6
-./paperlike_init_macos.py --brightness 32       # Brightness 0-64
-./paperlike_init_macos.py --speed 5             # Speed 1-8
-./paperlike_init_macos.py --temperature 3       # Color temperature 0-5
-./paperlike_init_macos.py --front-light 1       # Front light (0=off, 1=warm, 2=cold)
-./paperlike_init_macos.py --dither off          # MCU dithering (on/off)
-./paperlike_init_macos.py --refresh             # Force full refresh
-./paperlike_init_macos.py --query               # Query device info
-./paperlike_init_macos.py --mode 3 --brightness 32 --daemon  # Combine
-./paperlike_init_macos.py --send 0x02 0x03      # Send raw command
+./paperlike --mode 3                    # Display mode 1-6
+./paperlike --brightness 32             # Brightness 0-64
+./paperlike --speed 5                   # Speed/darkness 1-8
+./paperlike --temperature 3             # Color temperature 0-5
+./paperlike --front-light 1             # Front light (0=off 1=warm 2=cold 3=both)
+./paperlike --refresh                   # Force full refresh
+./paperlike --query                     # Query device info
+./paperlike --monitor                   # Monitor serial traffic
+./paperlike --send 0x02 0x03            # Send raw command
+./paperlike --mode 3 --brightness 32 --daemon   # Combine
+./paperlike /dev/cu.usbserial-1410 --daemon     # Specify port manually
 ```
+
+In daemon mode, the CLI handles USB disconnect/reconnect automatically.
 
 ### Display modes
 
-| Mode | Name    |
-|------|---------|
-| 1    | Fast    |
-| 2    | Fast+   |
-| 3    | Balance |
-| 4    | Text    |
-| 5    | Text+   |
-| 6    | Read    |
-
-### Daemon control socket
-
-When the daemon is running, commands from other instances are automatically
-forwarded via a Unix socket (e.g. `/var/folders/.../T/paperlike.sock`). No need to
-stop the daemon to change settings:
-
-```bash
-./paperlike_init_macos.py --daemon &      # start daemon
-./paperlike_init_macos.py --brightness 50  # forwarded to daemon
-./paperlike_init_macos.py --mode 1         # forwarded to daemon
-./paperlike_init_macos.py --query          # forwarded to daemon
-```
-
-### Disconnect/reconnect
-
-In daemon mode, the script handles USB disconnect and reconnect automatically.
-When the display is unplugged, it waits for the device to reappear (the serial
-port path may change, e.g. `cu.usbserial-1410` -> `cu.usbserial-1420`) and re-runs the full init.
+| Mode | Name   |
+|------|--------|
+| 1    | Web    |
+| 2    | Text   |
+| 3    | Image  |
+| 4    | Active |
+| 5    | Heavy  |
 
 ## Hardware
 
@@ -91,11 +93,11 @@ port path may change, e.g. `cu.usbserial-1410` -> `cu.usbserial-1420`) and re-ru
 | 0x01 | 1-8   | Set speed/threshold |
 | 0x02 | 1-6   | Set display mode |
 | 0x03 | 1     | Force refresh |
-| 0x07 | 0-2   | Set front light mode (0=off, 1=warm, 2=cold) |
+| 0x07 | 0-3   | Set front light (0=off, 1=warm, 2=cold, 3=both) |
 | 0x08 | 0-5   | Set color temperature |
 | 0x09 | 0-64  | Set brightness |
 | 0x0A | *     | Query (opt selects parameter) |
-| 0x20 | 0/1   | Dithering control (0=enable/deactivate, 1=disable/activate) |
+| 0x20 | 0/1   | Activate/deactivate display |
 
 The display stays active only with periodic `0x20 0x01` commands (~10s interval).
 On shutdown, send `0x20 0x00` to deactivate cleanly.
