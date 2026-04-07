@@ -1,17 +1,22 @@
 import SwiftUI
 import AppKit
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     var daemonManager = NativeDaemonManager()
     var shortcutManager = GlobalShortcutManager()
-    
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         DisplayDriverInitializer.applyInitOverrides()
-        shortcutManager.onTriggerForceRefresh = { [weak self] in
-            self?.daemonManager.forceRefresh()
+        let worker = daemonManager.worker
+        shortcutManager.onTriggerForceRefresh = {
+            worker.sendCommand(cmd: 0x03, opt: 0x01)
         }
-        // This is called once the app and its event loop are ready
         print("App finished launching, managers initialized.")
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        daemonManager.shutdown()
     }
 }
 
@@ -28,10 +33,11 @@ struct PaperlikeNativeApp: App {
 }
 
 // Custom Window Manager for Settings
+@MainActor
 class SettingsWindowManager {
     static let shared = SettingsWindowManager()
     private var window: NSWindow?
-    
+
     func showWindow(shortcutManager: GlobalShortcutManager) {
         if window == nil {
             let hostingController = NSHostingController(rootView: SettingsView(shortcutManager: shortcutManager))
@@ -45,30 +51,29 @@ class SettingsWindowManager {
             win.isReleasedWhenClosed = false
             self.window = win
         }
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
     }
 }
 
-// Global Shortcut Manager using AppKit
+// Global Shortcut Manager using Carbon
+@MainActor
 class GlobalShortcutManager: ObservableObject {
     @Published var refreshKeyCode: UInt16?
     @Published var refreshModifiers: NSEvent.ModifierFlags?
-    var onTriggerForceRefresh: (() -> Void)?
-    
-    // Carbon doesn't need a global monitor reference like NSEvent does
-    // but we can wrap it in our manager.
+    var onTriggerForceRefresh: (@Sendable () -> Void)? {
+        didSet { setupCarbonHotkey() }
+    }
 
-    
     init() {
         loadShortcut()
         setupCarbonHotkey()
     }
-    
-    deinit {
+
+    nonisolated deinit {
         CarbonHotkeyManager.shared.unregister()
     }
-    
+
     func saveShortcut(keyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
         self.refreshKeyCode = keyCode
         self.refreshModifiers = modifiers
@@ -76,7 +81,7 @@ class GlobalShortcutManager: ObservableObject {
         UserDefaults.standard.set(modifiers.rawValue, forKey: "refreshModifiers")
         setupCarbonHotkey()
     }
-    
+
     func clearShortcut() {
         self.refreshKeyCode = nil
         self.refreshModifiers = nil
@@ -84,21 +89,20 @@ class GlobalShortcutManager: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "refreshModifiers")
         CarbonHotkeyManager.shared.unregister()
     }
-    
+
     private func loadShortcut() {
         if UserDefaults.standard.object(forKey: "refreshKeyCode") != nil {
             self.refreshKeyCode = UInt16(UserDefaults.standard.integer(forKey: "refreshKeyCode"))
             self.refreshModifiers = NSEvent.ModifierFlags(rawValue: UInt(UserDefaults.standard.integer(forKey: "refreshModifiers")))
-            setupCarbonHotkey()
         }
     }
-    
+
     private func setupCarbonHotkey() {
         guard let code = refreshKeyCode, let mods = refreshModifiers else { return }
-        
+        let callback = self.onTriggerForceRefresh
         CarbonHotkeyManager.shared.register(keyCode: code, modifiers: mods) {
-            if let onTriggerForceRefresh = self.onTriggerForceRefresh {
-                onTriggerForceRefresh()
+            if let callback = callback {
+                callback()
             } else {
                 DispatchQueue.main.async {
                     NotificationCenter.default.post(name: NSNotification.Name("TriggerForceRefresh"), object: nil)
@@ -111,7 +115,7 @@ class GlobalShortcutManager: ObservableObject {
 struct SettingsView: View {
     @ObservedObject var shortcutManager: GlobalShortcutManager
     @State private var isRecording = false
-    
+
     var body: some View {
         Form {
             Section {
@@ -132,7 +136,7 @@ struct SettingsView: View {
                     .padding(4)
                     .background(Color.secondary.opacity(0.2))
                     .cornerRadius(4)
-                    
+
                     if shortcutManager.refreshKeyCode != nil {
                         Button(action: {
                             shortcutManager.clearShortcut()
@@ -150,27 +154,24 @@ struct SettingsView: View {
         }
         .padding(20)
         .frame(width: 400, height: 150)
-        // Background listening for key events when recording
         .background(
             KeyEventHandlingView(isRecording: $isRecording, shortcutManager: shortcutManager)
                 .frame(width: 0, height: 0)
         )
     }
-    
+
     private func shortcutText() -> String {
         guard let mods = shortcutManager.refreshModifiers, let code = shortcutManager.refreshKeyCode else {
             return "Click to Record"
         }
-        
+
         var text = ""
-        if mods.contains(.control) { text += "⌃" }
-        if mods.contains(.option) { text += "⌥" }
-        if mods.contains(.shift) { text += "⇧" }
-        if mods.contains(.command) { text += "⌘" }
-        
-        // Basic mapping for common keys, typically one would use a Carbon table 
-        // to map keycodes to characters, but for a simple UI this suffices or we just show KeyCode
-        text += String(format: "[Key %d]", code) 
+        if mods.contains(.control) { text += "\u{2303}" }
+        if mods.contains(.option) { text += "\u{2325}" }
+        if mods.contains(.shift) { text += "\u{21E7}" }
+        if mods.contains(.command) { text += "\u{2318}" }
+
+        text += String(format: "[Key %d]", code)
         return text
     }
 }
@@ -179,25 +180,24 @@ struct SettingsView: View {
 struct KeyEventHandlingView: NSViewRepresentable {
     @Binding var isRecording: Bool
     var shortcutManager: GlobalShortcutManager
-    
+
     func makeNSView(context: Context) -> CustomKeyView {
         let view = CustomKeyView()
         view.onKeyDown = { event in
             if isRecording {
                 let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
                 if !modifiers.isEmpty {
-                    // Save shortcut
                     shortcutManager.saveShortcut(keyCode: event.keyCode, modifiers: modifiers)
                     isRecording = false
-                    return true // Handled
+                    return true
                 }
             }
-            return false // Not handled
+            return false
         }
         DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
         return view
     }
-    
+
     func updateNSView(_ nsView: CustomKeyView, context: Context) {
         if isRecording {
             DispatchQueue.main.async { nsView.window?.makeFirstResponder(nsView) }
@@ -207,9 +207,9 @@ struct KeyEventHandlingView: NSViewRepresentable {
 
 class CustomKeyView: NSView {
     var onKeyDown: ((NSEvent) -> Bool)?
-    
+
     override var acceptsFirstResponder: Bool { true }
-    
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if let handler = onKeyDown, handler(event) {
             return true
@@ -221,6 +221,8 @@ class CustomKeyView: NSView {
 struct ContentView: View {
     @ObservedObject var manager: NativeDaemonManager
     @ObservedObject var shortcutManager: GlobalShortcutManager
+    @State private var localSpeed: Double = 5
+    @State private var localBrightness: Double = 32
     private let modeOptions: [(value: Int, title: String)] = [
         (1, "Web"),
         (2, "Text"),
@@ -265,12 +267,16 @@ struct ContentView: View {
                 HStack {
                     Text("Darkness:")
                         .frame(width: 100, alignment: .leading)
-                    Text("\(manager.speed)").monospacedDigit()
+                    Text("\(Int(localSpeed))").monospacedDigit()
                 }
-                Slider(value: Binding(
-                    get: { Double(manager.speed) },
-                    set: { manager.updateSpeed(Int($0)) }
-                ), in: 1...8, step: 1)
+                Slider(value: $localSpeed, in: 1...8, step: 1) { editing in
+                    if !editing {
+                        manager.updateSpeed(Int(localSpeed))
+                    }
+                }
+                .onChange(of: manager.speed) { _, newValue in
+                    localSpeed = Double(newValue)
+                }
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -282,6 +288,7 @@ struct ContentView: View {
                     Text("Off").tag(0)
                     Text("Cold").tag(1)
                     Text("Warm").tag(2)
+                    Text("Both").tag(3)
                 }
                 .pickerStyle(SegmentedPickerStyle())
             }
@@ -290,12 +297,39 @@ struct ContentView: View {
                 HStack {
                     Text("Brightness:")
                         .frame(width: 80, alignment: .leading)
-                    Text("\(manager.brightness)").monospacedDigit()
+                    Text("\(Int(localBrightness))").monospacedDigit()
                 }
-                Slider(value: Binding(
-                    get: { Double(manager.brightness) },
-                    set: { manager.updateBrightness(Int($0)) }
-                ), in: 0...64, step: 1)
+                Slider(value: $localBrightness, in: 0...64, step: 1) { editing in
+                    if !editing {
+                        manager.updateBrightness(Int(localBrightness))
+                    }
+                }
+                .onChange(of: manager.brightness) { _, newValue in
+                    localBrightness = Double(newValue)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(isOn: Binding(
+                    get: { manager.autoRefreshEnabled },
+                    set: { manager.autoRefreshEnabled = $0 }
+                )) {
+                    Text("Auto Refresh")
+                }
+                if manager.autoRefreshEnabled {
+                    Picker("Interval:", selection: Binding(
+                        get: { manager.autoRefreshMinutes },
+                        set: { manager.autoRefreshMinutes = $0 }
+                    )) {
+                        Text("1 min").tag(1)
+                        Text("2 min").tag(2)
+                        Text("5 min").tag(5)
+                        Text("10 min").tag(10)
+                        Text("15 min").tag(15)
+                        Text("30 min").tag(30)
+                    }
+                    .pickerStyle(.menu)
+                }
             }
 
             Divider()
@@ -315,6 +349,10 @@ struct ContentView: View {
         }
         .padding()
         .frame(width: 280)
+        .onAppear {
+            localSpeed = Double(manager.speed)
+            localBrightness = Double(manager.brightness)
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TriggerForceRefresh"))) { _ in
             manager.forceRefresh()
         }

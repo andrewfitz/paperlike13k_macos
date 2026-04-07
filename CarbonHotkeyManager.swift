@@ -2,13 +2,13 @@ import Foundation
 import AppKit
 import Carbon
 
-class CarbonHotkeyManager {
+final class CarbonHotkeyManager: @unchecked Sendable {
     static let shared = CarbonHotkeyManager()
-    
+
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
-    
-    typealias HotKeyHandler = () -> Void
+
+    typealias HotKeyHandler = @Sendable () -> Void
     private var handler: HotKeyHandler?
     
     init() {
