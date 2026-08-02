@@ -14,6 +14,7 @@ struct CLIArgs {
     var refresh = false
     var query = false
     var monitor = false
+    var diagnose = false
     var rawCommands: [(UInt8, UInt8)] = []
     var help = false
 }
@@ -36,6 +37,7 @@ func printUsage() {
       --refresh             Force display refresh
       --query               Query device info
       --monitor             Monitor serial traffic (Ctrl+C to stop)
+      --diagnose            Debug USB connection stability (high-freq monitoring)
       --send CMD OPT        Send raw command (hex or decimal)
       --help                Show this help
 
@@ -95,6 +97,8 @@ func parseArgs() -> CLIArgs {
             args.query = true
         case "--monitor":
             args.monitor = true
+        case "--diagnose":
+            args.diagnose = true
         case "--send":
             guard i + 2 < argv.count,
                   let cmd = parseHexOrDec(argv[i + 1]),
@@ -234,6 +238,365 @@ func timestamp() -> String {
     return df.string(from: Date())
 }
 
+func timestampMs() -> String {
+    let df = DateFormatter()
+    df.dateFormat = "HH:mm:ss.SSS"
+    return df.string(from: Date())
+}
+
+// MARK: - Diagnostic Mode
+
+struct DisconnectEvent {
+    let timestamp: Date
+    let reconnectedAt: Date?
+    let type: String          // "USB_REMOVED", "SERIAL_ERROR", "HEARTBEAT_TIMEOUT"
+    let oldPort: String
+    let newPort: String?
+
+    var durationMs: Int? {
+        guard let r = reconnectedAt else { return nil }
+        return Int(r.timeIntervalSince(timestamp) * 1000)
+    }
+}
+
+func runDiagnostic(specifiedPort: String?) {
+    print("=== Paperlike USB Connection Diagnostic ===")
+    print("Started: \(timestampMs())")
+    print("Polling interval: 200ms (device presence) / 5s (heartbeat)")
+    print("Press Ctrl+C to stop and see summary\n")
+
+    installSignalHandlers()
+
+    // Start system log watcher for USB events
+    let logProcess = Process()
+    let logPipe = Pipe()
+    logProcess.executableURL = URL(fileURLWithPath: "/usr/bin/log")
+    logProcess.arguments = [
+        "stream", "--style", "compact",
+        "--predicate",
+        "subsystem == \"com.apple.usb\" OR eventMessage CONTAINS[c] \"IOUSBHost\" OR eventMessage CONTAINS[c] \"CH34\" OR eventMessage CONTAINS[c] \"usbserial\""
+    ]
+    logProcess.standardOutput = logPipe
+    logProcess.standardError = FileHandle.nullDevice
+
+    // Collect system log lines in background
+    nonisolated(unsafe) var sysLogLines: [String] = []
+    let sysLogLock = NSLock()
+    logPipe.fileHandleForReading.readabilityHandler = { handle in
+        let data = handle.availableData
+        guard !data.isEmpty, let str = String(data: data, encoding: .utf8) else { return }
+        for line in str.components(separatedBy: .newlines) where !line.isEmpty {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            sysLogLock.lock()
+            sysLogLines.append(trimmed)
+            sysLogLock.unlock()
+            print("  [\(timestampMs())] SYSLOG: \(trimmed)")
+            fflush(stdout)
+        }
+    }
+    try? logProcess.run()
+
+    // Find initial port
+    var currentPortPath = specifiedPort ?? SerialPort.findWCHPort()
+    if currentPortPath == nil {
+        print("[\(timestampMs())] NO DEVICE - waiting for USB serial device...")
+        while !shouldExit {
+            usleep(200_000)
+            if let p = SerialPort.findWCHPort() {
+                currentPortPath = p
+                print("[\(timestampMs())] DEVICE FOUND: \(p)")
+                break
+            }
+        }
+    }
+    guard let startPort = currentPortPath, !shouldExit else {
+        printDiagSummary([], Date()); return
+    }
+    _ = startPort // used to seed currentPortPath
+
+    print("[\(timestampMs())] DEVICE: \(currentPortPath!)")
+
+    // List all serial devices for context
+    let fm = FileManager.default
+    if let items = try? fm.contentsOfDirectory(atPath: "/dev") {
+        let serialDevs = items.filter { $0.hasPrefix("cu.usb") || $0.hasPrefix("cu.wch") }.sorted()
+        if !serialDevs.isEmpty {
+            print("[\(timestampMs())] ALL SERIAL DEVICES: \(serialDevs.map { "/dev/\($0)" }.joined(separator: ", "))")
+        }
+    }
+
+    // Open port
+    var port = SerialPort(path: currentPortPath!)
+    guard port.openPort() else {
+        print("[\(timestampMs())] OPEN FAILED: \(String(cString: strerror(errno)))")
+        printDiagSummary([], Date()); return
+    }
+    _ = port.readAvailable()
+    print("[\(timestampMs())] PORT OPENED: \(currentPortPath!)")
+
+    // Activate
+    port.writeString(PaperlikeProtocol.makePacket(cmd: 0x20, opt: 0x01))
+    usleep(200_000)
+    let initResp = port.readAvailable()
+    if !initResp.isEmpty {
+        let pkts = PaperlikeProtocol.parsePackets(initResp)
+        for p in pkts {
+            print("[\(timestampMs())] INIT RESPONSE: cmd=0x\(hex(p.cmd)) opt=0x\(hex(p.opt)) payload=\(p.payload)")
+        }
+    }
+    print("[\(timestampMs())] ACTIVATED - beginning monitoring\n")
+
+    let sessionStart = Date()
+    var events: [DisconnectEvent] = []
+    var lastHeartbeatSent = Date()
+    var lastHeartbeatOk: Date? = nil
+    var heartbeatsSent = 0
+    var heartbeatsOk = 0
+    var heartbeatsFailed = 0
+    // var serialErrors = 0  // reserved for future write-error tracking
+    var isConnected = true
+    var disconnectedAt: Date? = nil
+    var disconnectType = ""
+    var disconnectPort = ""
+    var consecutiveReadFailures = 0
+    let heartbeatInterval: TimeInterval = 5.0
+    let pollInterval: UInt32 = 200_000 // 200ms
+
+    while !shouldExit {
+        usleep(pollInterval)
+        let now = Date()
+
+        if isConnected {
+            // Check 1: Does the device file still exist?
+            let deviceExists = fm.fileExists(atPath: currentPortPath!)
+            if !deviceExists {
+                isConnected = false
+                disconnectedAt = now
+                disconnectType = "USB_REMOVED"
+                disconnectPort = currentPortPath!
+                print("[\(timestampMs())] *** USB DISCONNECT *** device file gone: \(currentPortPath!)")
+                print("[\(timestampMs())]   Type: USB/physical - device removed from /dev")
+                print("[\(timestampMs())]   Likely cause: USB link reset, cable issue, or power interruption")
+                port.closePort()
+
+                // Dump any new syslog lines
+                sysLogLock.lock()
+                let recentLogs = sysLogLines.suffix(5)
+                sysLogLock.unlock()
+                if !recentLogs.isEmpty {
+                    print("[\(timestampMs())]   Recent USB system messages:")
+                    for l in recentLogs {
+                        print("[\(timestampMs())]     \(l)")
+                    }
+                }
+                continue
+            }
+
+            // Check 2: Try reading any available data
+            let data = port.readAvailable()
+            if !data.isEmpty {
+                consecutiveReadFailures = 0
+                let pkts = PaperlikeProtocol.parsePackets(data)
+                for p in pkts {
+                    if p.cmd == 0xF5 {
+                        lastHeartbeatOk = now
+                        heartbeatsOk += 1
+                    } else {
+                        print("[\(timestampMs())] RX: cmd=0x\(hex(p.cmd)) opt=0x\(hex(p.opt)) payload=\(p.payload)")
+                    }
+                }
+            }
+
+            // Check 3: Periodic heartbeat/keepalive probe
+            if now.timeIntervalSince(lastHeartbeatSent) >= heartbeatInterval {
+                heartbeatsSent += 1
+                lastHeartbeatSent = now
+
+                let packet = PaperlikeProtocol.makePacket(cmd: 0x20, opt: 0x01)
+                port.writeString(packet)
+                usleep(150_000) // wait for response
+
+                let resp = port.readAvailable()
+                if resp.isEmpty {
+                    consecutiveReadFailures += 1
+                    let elapsed = lastHeartbeatOk.map { String(format: "%.1fs ago", now.timeIntervalSince($0)) } ?? "never"
+                    print("[\(timestampMs())] HEARTBEAT: no response (last ok: \(elapsed), consecutive fails: \(consecutiveReadFailures))")
+
+                    if consecutiveReadFailures >= 3 {
+                        heartbeatsFailed += 1
+                        isConnected = false
+                        disconnectedAt = now
+                        disconnectType = "HEARTBEAT_TIMEOUT"
+                        disconnectPort = currentPortPath!
+                        print("[\(timestampMs())] *** SERIAL DISCONNECT *** 3 consecutive heartbeat failures")
+                        print("[\(timestampMs())]   Type: Data/firmware - USB device present but MCU unresponsive")
+                        print("[\(timestampMs())]   Likely cause: MCU hang, serial buffer overflow, or data corruption")
+                        port.closePort()
+                    }
+                } else {
+                    consecutiveReadFailures = 0
+                    let pkts = PaperlikeProtocol.parsePackets(resp)
+                    let hasResponse = pkts.contains { $0.cmd == 0xF5 || $0.cmd == 0xF0 }
+                    if hasResponse {
+                        lastHeartbeatOk = now
+                        heartbeatsOk += 1
+                        let df = DateFormatter()
+                        df.dateFormat = "HH:mm:ss"
+                        print("\r[\(df.string(from: now))] heartbeat ok (\(heartbeatsOk)/\(heartbeatsSent))   ", terminator: "")
+                        fflush(stdout)
+                    } else {
+                        print("[\(timestampMs())] HEARTBEAT: unexpected response: \(resp.prefix(48))")
+                    }
+                }
+            }
+        } else {
+            // Disconnected - scan for device
+            if let newPath = SerialPort.findWCHPort() {
+                let newPort = SerialPort(path: newPath)
+                if newPort.openPort() {
+                    let reconnectedAt = Date()
+                    let duration = disconnectedAt.map { Int(reconnectedAt.timeIntervalSince($0) * 1000) } ?? 0
+                    _ = newPort.readAvailable()
+
+                    print("")
+                    print("[\(timestampMs())] *** RECONNECTED *** \(newPath) (offline \(duration)ms)")
+                    if newPath != disconnectPort {
+                        print("[\(timestampMs())]   Port changed: \(disconnectPort) -> \(newPath)")
+                    }
+
+                    // Re-activate
+                    newPort.writeString(PaperlikeProtocol.makePacket(cmd: 0x20, opt: 0x01))
+                    usleep(200_000)
+                    let resp = newPort.readAvailable()
+                    if !resp.isEmpty {
+                        print("[\(timestampMs())]   Re-activation response received")
+                    }
+
+                    let event = DisconnectEvent(
+                        timestamp: disconnectedAt ?? reconnectedAt,
+                        reconnectedAt: reconnectedAt,
+                        type: disconnectType,
+                        oldPort: disconnectPort,
+                        newPort: newPath != disconnectPort ? newPath : nil
+                    )
+                    events.append(event)
+
+                    port = newPort
+                    currentPortPath = newPath
+                    isConnected = true
+                    consecutiveReadFailures = 0
+                    lastHeartbeatSent = reconnectedAt
+                    print("[\(timestampMs())]   Monitoring resumed\n")
+                }
+            }
+        }
+    }
+
+    // Cleanup
+    print("\n")
+    if isConnected {
+        port.writeString(PaperlikeProtocol.makePacket(cmd: 0x20, opt: 0x00))
+        usleep(100_000)
+        port.closePort()
+    }
+    logProcess.terminate()
+    logPipe.fileHandleForReading.readabilityHandler = nil
+
+    // If currently disconnected, record it
+    if !isConnected, let disc = disconnectedAt {
+        events.append(DisconnectEvent(
+            timestamp: disc, reconnectedAt: nil, type: disconnectType,
+            oldPort: disconnectPort, newPort: nil
+        ))
+    }
+
+    printDiagSummary(events, sessionStart)
+}
+
+func printDiagSummary(_ events: [DisconnectEvent], _ sessionStart: Date) {
+    let duration = Date().timeIntervalSince(sessionStart)
+    let mins = Int(duration) / 60
+    let secs = Int(duration) % 60
+
+    print("=== Diagnostic Summary ===")
+    print("  Session duration: \(mins)m \(secs)s")
+    print("  Total disconnects: \(events.count)")
+
+    if events.isEmpty {
+        print("  No disconnects detected during this session.")
+        return
+    }
+
+    let usbRemoved = events.filter { $0.type == "USB_REMOVED" }
+    let heartbeatTimeout = events.filter { $0.type == "HEARTBEAT_TIMEOUT" }
+    let serialError = events.filter { $0.type == "SERIAL_ERROR" }
+
+    print("  By type:")
+    if !usbRemoved.isEmpty {
+        print("    USB/physical disconnects: \(usbRemoved.count)  (device vanished from /dev)")
+    }
+    if !heartbeatTimeout.isEmpty {
+        print("    Heartbeat timeouts:       \(heartbeatTimeout.count)  (device present, MCU unresponsive)")
+    }
+    if !serialError.isEmpty {
+        print("    Serial I/O errors:        \(serialError.count)  (read/write failures)")
+    }
+
+    let durations = events.compactMap { $0.durationMs }
+    if !durations.isEmpty {
+        let avg = durations.reduce(0, +) / durations.count
+        let maxD = durations.max()!
+        let minD = durations.min()!
+        print("  Disconnect durations:")
+        print("    Shortest: \(minD)ms")
+        print("    Longest:  \(maxD)ms")
+        print("    Average:  \(avg)ms")
+    }
+
+    let portChanged = events.filter { $0.newPort != nil }
+    if !portChanged.isEmpty {
+        print("  Port path changed \(portChanged.count) time(s) (USB re-enumeration)")
+    }
+
+    print("\n  Event log:")
+    let df = DateFormatter()
+    df.dateFormat = "HH:mm:ss.SSS"
+    for (i, e) in events.enumerated() {
+        let dur = e.durationMs.map { "\($0)ms" } ?? "ongoing"
+        let portInfo = e.newPort.map { " -> \($0)" } ?? ""
+        print("    #\(i+1) [\(df.string(from: e.timestamp))] \(e.type) \(e.oldPort)\(portInfo) (\(dur))")
+    }
+
+    print("\n  Interpretation:")
+    if !usbRemoved.isEmpty && heartbeatTimeout.isEmpty {
+        print("    All disconnects are USB-level (device removal from /dev).")
+        print("    This points to a physical/power issue:")
+        print("      - USB-C cable or connector making intermittent contact")
+        print("      - USB hub or dock power management")
+        print("      - macOS USB power saving (check System Settings > Energy)")
+        print("      - Insufficient USB bus power under load")
+        if let avg = durations.isEmpty ? nil : durations.reduce(0, +) / durations.count {
+            if avg < 500 {
+                print("    Sub-500ms reconnects suggest a brief USB link reset,")
+                print("    likely a power glitch or signal integrity issue on the cable.")
+            }
+        }
+    } else if usbRemoved.isEmpty && !heartbeatTimeout.isEmpty {
+        print("    All disconnects are heartbeat timeouts (MCU unresponsive).")
+        print("    The USB link stayed up but the display MCU stopped responding.")
+        print("    This points to a firmware/data issue:")
+        print("      - MCU firmware hang or watchdog reset")
+        print("      - Serial buffer overflow")
+        print("      - EMI/noise corrupting serial data")
+    } else if !usbRemoved.isEmpty && !heartbeatTimeout.isEmpty {
+        print("    Mixed disconnect types detected.")
+        print("    Both USB-level and MCU-level issues are occurring.")
+        print("    Try isolating: use a different USB-C cable/port first,")
+        print("    then check if heartbeat timeouts persist alone.")
+    }
+}
+
 // MARK: - Signal Handling
 
 nonisolated(unsafe) var shouldExit = false
@@ -293,6 +656,12 @@ struct PaperlikeCLIMain {
                 usleep(10_000)
             }
             port.closePort()
+            return
+        }
+
+        // --- Diagnose mode ---
+        if cliArgs.diagnose {
+            runDiagnostic(specifiedPort: cliArgs.port)
             return
         }
 
